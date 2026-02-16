@@ -9,4 +9,4 @@ enabled = true
 mode = "smart"
 
 [vars]
-ALLOW_QUERY_AUTH = "false"
+ALLOW_QUERY_AUTH = "true"

@@ -1,98 +1,173 @@
+import pLimit from "p-limit";
 import type { FileNode } from "../types";
-import type { paths } from "../types/bitbucket-schema";
+import { shouldIgnore } from "../utils/ignore";
 
 const API_BASE = "https://api.bitbucket.org/2.0";
 
-// We use 'any' for the response type because the generated types for the src endpoint
-// can be complex (union of file, directory, paginated list, etc) and we want to be practical.
-// However, strictly it matches the schema.
-type SrcResponse =
-  paths["/repositories/{workspace}/{repo_slug}/src/{commit}/{path}"]["get"]["responses"]["200"]["content"]["application/json"];
+// Shared concurrency limit for all network requests to avoid rate limits and connection limits
+const limit = pLimit(10);
 
-async function fetchWithAuth(url: string, authHeader: string | null): Promise<Response> {
-  const headers: HeadersInit = {
-    Accept: "application/json",
-  };
-  if (authHeader) {
-    headers["Authorization"] = authHeader;
+export class BitbucketClient {
+  constructor(
+    private workspace: string,
+    private repo_slug: string,
+    private commit: string,
+    private authHeader: string | null,
+  ) {}
+
+  private async fetchWithAuth(url: string): Promise<Response> {
+    const headers: HeadersInit = {
+      Accept: "application/json",
+    };
+    if (this.authHeader) {
+      headers["Authorization"] = this.authHeader;
+    }
+    return fetch(url, { headers });
   }
-  return fetch(url, { headers });
-}
 
-export async function fetchDirectoryListing(
-  workspace: string,
-  repo_slug: string,
-  commit: string,
-  path: string,
-  authHeader: string | null,
-): Promise<FileNode[]> {
-  const cleanPath = path.replace(/^\//, "");
-  // Ensure we don't have double slashes if path is empty
-  const urlPath = cleanPath ? `/${cleanPath}` : "/";
+  async fetchFileContent(path: string): Promise<string> {
+    const cleanPath = path.replace(/^\//, "");
+    const urlPath = cleanPath ? `/${cleanPath}` : "/";
+    const url = `${API_BASE}/repositories/${this.workspace}/${this.repo_slug}/src/${this.commit}${urlPath}`;
 
-  let url = `${API_BASE}/repositories/${workspace}/${repo_slug}/src/${commit}${urlPath}`;
+    const res = await this.fetchWithAuth(url);
+    if (!res.ok) throw new Error(`Failed to fetch file content: ${res.statusText}`);
+    return res.text();
+  }
 
-  const entries: FileNode[] = [];
+  async fetchDirectoryListing(path: string): Promise<FileNode[]> {
+    const cleanPath = path.replace(/^\//, "");
+    // Ensure we don't have double slashes if path is empty
+    const urlPath = cleanPath ? `/${cleanPath}` : "/";
 
-  while (url) {
-    const res = await fetchWithAuth(url, authHeader);
+    let url = `${API_BASE}/repositories/${this.workspace}/${this.repo_slug}/src/${this.commit}${urlPath}`;
 
-    if (!res.ok) {
-      if (res.status === 404) throw new Error(`Path not found: ${path}`);
-      if (res.status === 401) throw new Error("Unauthorized");
-      throw new Error(`Bitbucket API error: ${res.statusText}`);
-    }
+    const entries: FileNode[] = [];
 
-    // Check if response is JSON
-    const contentType = res.headers.get("content-type");
-    if (contentType && !contentType.includes("application/json")) {
-      // It's likely raw file content if we requested a file path
-      // Return empty array as it's not a directory
-      return [];
-    }
+    while (url) {
+      const res = await this.fetchWithAuth(url);
 
-    const data = (await res.json()) as any; // Cast to any to handle paginated structure easier
-
-    // data should be a PaginatedFiles struct with 'values'
-    if (data.values && Array.isArray(data.values)) {
-      for (const item of data.values) {
-        if (item.type === "commit_file") {
-          entries.push({
-            path: item.path,
-            type: "file",
-            size: item.size,
-            raw_url: item.links?.self?.href,
-          });
-        } else if (item.type === "commit_directory") {
-          entries.push({
-            path: item.path,
-            type: "directory",
-          });
-        }
+      if (!res.ok) {
+        if (res.status === 404) throw new Error(`Path not found: ${path}`);
+        if (res.status === 401) throw new Error("Unauthorized");
+        throw new Error(`Bitbucket API error: ${res.statusText}`);
       }
 
-      url = data.next || "";
-    } else {
-      // Not a paginated list, maybe single file metadata or something else
-      break;
+      // Check if response is JSON
+      const contentType = res.headers.get("content-type");
+      if (contentType && !contentType.includes("application/json")) {
+        // It's likely raw file content if we requested a file path
+        // Return empty array as it's not a directory
+        return [];
+      }
+
+      const data = (await res.json()) as any; // Cast to any to handle paginated structure easier
+
+      // data should be a PaginatedFiles struct with 'values'
+      if (data.values && Array.isArray(data.values)) {
+        for (const item of data.values) {
+          if (item.type === "commit_file") {
+            entries.push({
+              path: item.path,
+              type: "file",
+              size: item.size,
+              raw_url: item.links?.self?.href,
+            });
+          } else if (item.type === "commit_directory") {
+            entries.push({
+              path: item.path,
+              type: "directory",
+            });
+          }
+        }
+
+        url = data.next || "";
+      } else {
+        // Not a paginated list, maybe single file metadata or something else
+        break;
+      }
     }
+
+    return entries;
   }
 
-  return entries;
-}
+  async getTree(path: string, ignorePatterns: string[] = []): Promise<FileNode[]> {
+    // Use limited fetch for directory listing
+    const entries = await limit(() => this.fetchDirectoryListing(path));
 
-export async function fetchFileContent(
-  workspace: string,
-  repo_slug: string,
-  commit: string,
-  path: string,
-  authHeader: string | null,
-): Promise<string> {
-  const cleanPath = path.replace(/^\//, "");
-  const urlPath = cleanPath ? `/${cleanPath}` : "/";
-  const url = `${API_BASE}/repositories/${workspace}/${repo_slug}/src/${commit}${urlPath}`;
+    const filteredEntries = entries.filter((entry) => !shouldIgnore(entry.path, ignorePatterns));
 
-  const res = await fetchWithAuth(url, authHeader);
-  if (!res.ok) throw new Error(`Failed to fetch file content: ${res.statusText}`);
-  return res.text();
+    const results: FileNode[] = [];
+    const promises: Promise<void>[] = [];
+
+    for (const entry of filteredEntries) {
+      if (entry.type === "file") {
+        promises.push(
+          (async () => {
+            try {
+              // Use limited fetch for file content
+              const content = await limit(() => this.fetchFileContent(entry.path));
+              results.push({ ...entry, content });
+            } catch (err: any) {
+              results.push({ ...entry, error: err.message });
+            }
+          })(),
+        );
+      } else if (entry.type === "directory") {
+        promises.push(
+          (async () => {
+            try {
+              // Recursive call is NOT limited, but its internal network calls are.
+              // This avoids deadlock where a limited parent waits for a limited child.
+              const children = await this.getTree(entry.path, ignorePatterns);
+              results.push({ ...entry, children });
+            } catch (err: any) {
+              results.push({ ...entry, error: err.message });
+            }
+          })(),
+        );
+      }
+    }
+
+    await Promise.all(promises);
+
+    // Sort results by path for consistent output
+    return results.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  async *streamTextTree(path: string, ignorePatterns: string[] = []): AsyncGenerator<string> {
+    // Use limited fetch for directory listing
+    const entries = await limit(() => this.fetchDirectoryListing(path));
+
+    const filteredEntries = entries
+      .filter((entry) => !shouldIgnore(entry.path, ignorePatterns))
+      .sort((a, b) => a.path.localeCompare(b.path));
+
+    // Parallel fetch for files in current directory
+    const filePromises = filteredEntries
+      .filter((e) => e.type === "file")
+      .map((entry) => ({
+        entry,
+        promise: limit(() =>
+          this.fetchFileContent(entry.path).catch((e: any) => `Error: ${e.message}`),
+        ),
+      }));
+
+    // Iterate over sorted entries
+    for (const entry of filteredEntries) {
+      if (entry.type === "file") {
+        // Find the promise
+        const task = filePromises.find((t) => t.entry.path === entry.path);
+        if (task) {
+          const content = await task.promise;
+          yield `\n\nFile: ${entry.path}\n`;
+          yield "================================================================\n";
+          yield content;
+        }
+      } else if (entry.type === "directory") {
+        // Recursive stream (sequential for directories to avoid huge memory usage)
+        yield* this.streamTextTree(entry.path, ignorePatterns);
+      }
+    }
+  }
 }

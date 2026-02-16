@@ -1,5 +1,5 @@
+import type { Context, Next } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Context, Next } from "hono";
 import { authMiddleware } from "../src/middlewares/auth";
 
 describe("authMiddleware", () => {
@@ -33,69 +33,34 @@ describe("authMiddleware", () => {
     expect(next).toHaveBeenCalled();
   });
 
-  it("ignores query token when ALLOW_QUERY_AUTH is not set", async () => {
+  it("sets authHeader from query token (Bearer)", async () => {
     (c.req.header as any).mockReturnValue(undefined);
     (c.req.query as any).mockImplementation((key: string) => {
       if (key === "token") return "query-token";
       return undefined;
     });
-    c.env = {}; // Explicitly ensure empty
-
-    await authMiddleware(c, next);
-
-    expect(c.set).toHaveBeenCalledWith("authHeader", null);
-    expect(console.warn).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalled();
-  });
-
-  it("ignores query token when ALLOW_QUERY_AUTH is false", async () => {
-    (c.req.header as any).mockReturnValue(undefined);
-    (c.req.query as any).mockImplementation((key: string) => {
-      if (key === "token") return "query-token";
-      return undefined;
-    });
-    c.env = { ALLOW_QUERY_AUTH: "false" };
-
-    await authMiddleware(c, next);
-
-    expect(c.set).toHaveBeenCalledWith("authHeader", null);
-    expect(console.warn).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalled();
-  });
-
-  it("sets authHeader from query token (Bearer) when ALLOW_QUERY_AUTH is true, and warns", async () => {
-    (c.req.header as any).mockReturnValue(undefined);
-    (c.req.query as any).mockImplementation((key: string) => {
-      if (key === "token") return "query-token";
-      return undefined;
-    });
-    c.env = { ALLOW_QUERY_AUTH: "true" };
+    // c.env is irrelevant now
 
     await authMiddleware(c, next);
 
     expect(c.set).toHaveBeenCalledWith("authHeader", "Bearer query-token");
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining("Warning: Authentication via query parameters is deprecated"),
-    );
+    expect(console.warn).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalled();
   });
 
-  it("sets authHeader from query token and user (Basic) when ALLOW_QUERY_AUTH is true, and warns", async () => {
+  it("sets authHeader from query token and user (Basic)", async () => {
     (c.req.header as any).mockReturnValue(undefined);
     (c.req.query as any).mockImplementation((key: string) => {
       if (key === "token") return "query-token";
       if (key === "user") return "query-user";
       return undefined;
     });
-    c.env = { ALLOW_QUERY_AUTH: "true" };
 
     const expectedCredentials = btoa("query-user:query-token");
     await authMiddleware(c, next);
 
     expect(c.set).toHaveBeenCalledWith("authHeader", `Basic ${expectedCredentials}`);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining("Warning: Authentication via query parameters is deprecated"),
-    );
+    expect(console.warn).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalled();
   });
 
