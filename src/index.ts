@@ -1,7 +1,7 @@
 import { type Context, Hono } from "hono";
-import { formatPlain } from "./formatters/plain";
+import { streamText } from "hono/streaming";
 import { authMiddleware } from "./middlewares/auth";
-import { fetchTree } from "./services/tree";
+import { BitbucketClient } from "./services/bitbucket";
 import type { FileNode, Variables } from "./types";
 
 const app = new Hono<{ Variables: Variables; Bindings: CloudflareBindings }>();
@@ -24,28 +24,61 @@ const handler = async (c: Context<{ Variables: Variables; Bindings: CloudflareBi
   const authHeader = c.get("authHeader");
 
   try {
-    let nodes: FileNode[];
-    try {
-      nodes = await fetchTree(workspace, repo_slug, branch, pathParam, authHeader, ignore);
-    } catch (err: any) {
-      // Retry with 'master' if 'main' failed and branch wasn't specified
-      // Only if the error suggests the branch/path wasn't found (404)
-      if (
-        !userProvidedBranch &&
-        branch === "main" &&
-        (err.message.toLowerCase().includes("not found") || err.message.includes("404"))
-      ) {
-        nodes = await fetchTree(workspace, repo_slug, "master", pathParam, authHeader, ignore);
-      } else {
-        throw err;
+    // Helper to fetch ignore patterns
+    const getIgnorePatterns = async (client: BitbucketClient) => {
+      const ignoreFiles = [".gitignore", ".genignore"];
+      const ignoreContents = await Promise.all(
+        ignoreFiles.map(async (f) => {
+          try {
+            return await client.fetchFileContent(f);
+          } catch (e: any) {
+            return "";
+          }
+        }),
+      );
+      return ignoreContents
+        .filter(Boolean)
+        .flatMap((content) => content.split("\n"))
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"));
+    };
+
+    // Helper to find valid branch (main or master fallback)
+    const findValidBranch = async (initialBranch: string) => {
+      let client = new BitbucketClient(workspace, repo_slug, initialBranch, authHeader);
+      try {
+        // Try to fetch root listing to verify branch existence
+        // This prevents starting a stream on a non-existent branch
+        await client.fetchDirectoryListing("");
+        return client;
+      } catch (e: any) {
+        if (
+          !userProvidedBranch &&
+          initialBranch === "main" &&
+          (e.message.toLowerCase().includes("not found") || e.message.includes("404"))
+        ) {
+          // Retry with master
+          client = new BitbucketClient(workspace, repo_slug, "master", authHeader);
+          await client.fetchDirectoryListing("");
+          return client;
+        }
+        throw e;
       }
-    }
+    };
+
+    const client = await findValidBranch(branch);
+    const dynamicIgnores = await getIgnorePatterns(client);
+    const combinedIgnore = [...ignore, ...dynamicIgnores];
 
     if (format === "json") {
+      const nodes = await client.getTree(pathParam, combinedIgnore);
       return c.json(nodes);
     } else {
-      const text = formatPlain(nodes);
-      return c.text(text);
+      return streamText(c, async (stream) => {
+        for await (const chunk of client.streamTextTree(pathParam, combinedIgnore)) {
+          await stream.write(chunk);
+        }
+      });
     }
   } catch (err: any) {
     const message = err.message || "Internal Server Error";
