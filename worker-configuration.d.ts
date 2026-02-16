@@ -2,4 +2,5 @@
 
 // eslint-disable-next-line @typescript-eslint/no-empty-interface,@typescript-eslint/no-empty-object-type
 interface CloudflareBindings {
+	ALLOW_QUERY_AUTH?: string;
 }

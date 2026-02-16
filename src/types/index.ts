@@ -1,6 +1,6 @@
 export interface FileNode {
   path: string;
-  type: 'file' | 'directory';
+  type: "file" | "directory";
   content?: string; // Text content for files
   size?: number;
   children?: FileNode[]; // Only for directories
