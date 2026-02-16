@@ -183,22 +183,24 @@ export class BitbucketClient {
       .sort((a, b) => a.path.localeCompare(b.path));
 
     // Parallel fetch for files in current directory
-    const filePromises = filteredEntries
-      .filter((e) => e.type === "file")
-      .map((entry) => ({
-        entry,
-        promise: limit(() =>
-          this.fetchFileContent(entry.path).catch((e: unknown) => `Error: ${getErrorMessage(e)}`),
-        ),
-      }));
+    const filePromiseMap = new Map(
+      filteredEntries
+        .filter((e) => e.type === "file")
+        .map((entry) => [
+          entry.path,
+          limit(() =>
+            this.fetchFileContent(entry.path).catch((e: unknown) => `Error: ${getErrorMessage(e)}`),
+          ),
+        ]),
+    );
 
     // Iterate over sorted entries
     for (const entry of filteredEntries) {
       if (entry.type === "file") {
         // Find the promise
-        const task = filePromises.find((t) => t.entry.path === entry.path);
+        const task = filePromiseMap.get(entry.path);
         if (task) {
-          const content = await task.promise;
+          const content = await task;
           yield `\n\nFile: ${entry.path}\n`;
           yield "================================================================\n";
           yield content;
