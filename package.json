@@ -5,7 +5,10 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings",
-    "test": "vitest run"
+    "test": "vitest run",
+    "update-spec": "curl -s https://api.bitbucket.org/swagger.v3.json -o swagger.v3.json",
+    "generate-types": "npx openapi-typescript swagger.v3.json -o src/types/bitbucket-schema.d.ts",
+    "update-types": "npm run update-spec && npm run generate-types"
   },
   "dependencies": {
     "hono": "^4.11.9",

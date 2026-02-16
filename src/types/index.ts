@@ -1,3 +1,5 @@
+import type { paths } from "./bitbucket-schema";
+
 export interface FileNode {
   path: string;
   type: "file" | "directory";
@@ -11,3 +13,8 @@ export interface FileNode {
 export type Variables = {
   authHeader: string | null;
 };
+
+export type BitbucketSrcResponse =
+  paths["/repositories/{workspace}/{repo_slug}/src/{commit}/{path}"]["get"]["responses"][200]["content"]["application/json"];
+
+export type BitbucketTreeEntry = NonNullable<BitbucketSrcResponse["values"]>[number];
