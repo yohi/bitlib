@@ -7,3 +7,6 @@ enabled = true
 
 [placement]
 mode = "smart"
+
+[vars]
+ALLOW_QUERY_AUTH = "false"

@@ -1,28 +1,40 @@
-import { Context, Next } from 'hono';
-import { Variables } from '../types';
+import type { Context, Next } from "hono";
+import type { Variables } from "../types";
 
-export const authMiddleware = async (c: Context<{ Variables: Variables }>, next: Next) => {
-  const headerAuth = c.req.header('Authorization');
+export const authMiddleware = async (
+  c: Context<{ Variables: Variables; Bindings: CloudflareBindings }>,
+  next: Next,
+) => {
+  const headerAuth = c.req.header("Authorization");
   if (headerAuth) {
-    c.set('authHeader', headerAuth);
+    c.set("authHeader", headerAuth);
     await next();
     return;
   }
 
-  const queryToken = c.req.query('token');
-  const queryUser = c.req.query('user');
+  const allowQueryAuth = c.env.ALLOW_QUERY_AUTH === "true";
+  const queryToken = c.req.query("token");
+  const queryUser = c.req.query("user");
 
   if (queryToken) {
-    if (queryUser) {
-      // App Password: Basic <base64>
-      const credentials = btoa(`${queryUser}:${queryToken}`);
-      c.set('authHeader', `Basic ${credentials}`);
+    if (allowQueryAuth) {
+      console.warn(
+        "Warning: Authentication via query parameters is deprecated and insecure. Please use the Authorization header.",
+      );
+      if (queryUser) {
+        // App Password: Basic <base64>
+        const credentials = btoa(`${queryUser}:${queryToken}`);
+        c.set("authHeader", `Basic ${credentials}`);
+      } else {
+        // OAuth Token: Bearer <token>
+        c.set("authHeader", `Bearer ${queryToken}`);
+      }
     } else {
-      // OAuth Token: Bearer <token>
-      c.set('authHeader', `Bearer ${queryToken}`);
+      // Query auth is disabled, ignore the token
+      c.set("authHeader", null);
     }
   } else {
-    c.set('authHeader', null);
+    c.set("authHeader", null);
   }
 
   await next();
