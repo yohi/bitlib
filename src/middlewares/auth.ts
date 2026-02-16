@@ -14,8 +14,9 @@ export const authMiddleware = async (
 
   const queryToken = c.req.query("token");
   const queryUser = c.req.query("user");
+  const allowQueryAuth = c.env.ALLOW_QUERY_AUTH === "true";
 
-  if (queryToken) {
+  if (queryToken && allowQueryAuth) {
     if (queryUser) {
       // App Password: Basic <base64>
       const credentials = btoa(`${queryUser}:${queryToken}`);
