@@ -95,9 +95,13 @@ sequenceDiagram
 * **Hybrid Pass-through Authentication**:
     * Accept OAuth Token via `Authorization: Bearer <token>` header.
     * Accept App Password via `Authorization: Basic <base64>` header.
-    * **Crucial**: Accept `?token=<token>` query parameter and convert it to the appropriate Authorization header internally (for LLM ease of use).
+    * **Crucial**: Accept `?token=<token>` query parameter and convert it to the appropriate Authorization header internally (for LLM ease of use). **Note**: This is conditional; `?token` must only be converted when the runtime flag `ALLOW_QUERY_AUTH` is enabled (set to "true"). If `ALLOW_QUERY_AUTH` is false or undefined, `?token` is ignored/rejected to prevent credential leakage.
 * **Output Formats**:
-    * **Text (Default)**: Streamed concatenated file contents with headers (e.g., `--- filename.ts ---`).
+    * **Text (Default)**: Streamed concatenated file contents with headers.
+      ```text
+      File: filename.ts
+      ================================================================
+      ```
     * **JSON**: Structured JSON object representing the file tree and contents. (Note: JSON output currently does not support streaming).
 * **Branch Support**:
     * Default to `main` or `master` if unspecified.
@@ -174,7 +178,8 @@ Text mode utilizes Hono's `streamText` to deliver content efficiently as it's fe
 Files are separated by a delimiter containing the full path.
 
 ```text
---- path/to/file.ts ---
+File: path/to/file.ts
+================================================================
 import { Hono } from 'hono';
 ... content ...
 ```
