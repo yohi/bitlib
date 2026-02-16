@@ -1,8 +1,44 @@
 import pLimit from "p-limit";
-import type { FileNode } from "../types";
+import type { BitbucketSrcResponse, BitbucketTreeEntry, FileNode } from "../types";
 import { shouldIgnore } from "../utils/ignore";
 
 const API_BASE = "https://api.bitbucket.org/2.0";
+
+function isCommitFile(
+  entry: BitbucketTreeEntry,
+): entry is BitbucketTreeEntry & { type: "commit_file" } {
+  return entry.type === "commit_file";
+}
+
+function isCommitDirectory(
+  entry: BitbucketTreeEntry,
+): entry is BitbucketTreeEntry & { type: "commit_directory" } {
+  return entry.type === "commit_directory";
+}
+
+function getEntryPath(entry: BitbucketTreeEntry): string | null {
+  return typeof entry.path === "string" ? entry.path : null;
+}
+
+function getFileSize(entry: BitbucketTreeEntry): number | undefined {
+  const size = (entry as { size?: unknown }).size;
+  return typeof size === "number" ? size : undefined;
+}
+
+function getSelfHref(entry: BitbucketTreeEntry): string | undefined {
+  const links = (entry as { links?: unknown }).links;
+  if (!links || typeof links !== "object") return undefined;
+
+  const self = (links as { self?: unknown }).self;
+  if (!self || typeof self !== "object") return undefined;
+
+  const href = (self as { href?: unknown }).href;
+  return typeof href === "string" ? href : undefined;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 // Shared concurrency limit for all network requests to avoid rate limits and connection limits
 const limit = pLimit(10);
@@ -20,7 +56,7 @@ export class BitbucketClient {
       Accept: "application/json",
     };
     if (this.authHeader) {
-      headers["Authorization"] = this.authHeader;
+      headers.Authorization = this.authHeader;
     }
     return fetch(url, { headers });
   }
@@ -61,27 +97,30 @@ export class BitbucketClient {
         return [];
       }
 
-      const data = (await res.json()) as any; // Cast to any to handle paginated structure easier
+      const data: BitbucketSrcResponse = await res.json();
 
       // data should be a PaginatedFiles struct with 'values'
-      if (data.values && Array.isArray(data.values)) {
+      if (Array.isArray(data.values)) {
         for (const item of data.values) {
-          if (item.type === "commit_file") {
+          const itemPath = getEntryPath(item);
+          if (!itemPath) continue;
+
+          if (isCommitFile(item)) {
             entries.push({
-              path: item.path,
+              path: itemPath,
               type: "file",
-              size: item.size,
-              raw_url: item.links?.self?.href,
+              size: getFileSize(item),
+              raw_url: getSelfHref(item),
             });
-          } else if (item.type === "commit_directory") {
+          } else if (isCommitDirectory(item)) {
             entries.push({
-              path: item.path,
+              path: itemPath,
               type: "directory",
             });
           }
         }
 
-        url = data.next || "";
+        url = data.next ?? "";
       } else {
         // Not a paginated list, maybe single file metadata or something else
         break;
@@ -108,8 +147,8 @@ export class BitbucketClient {
               // Use limited fetch for file content
               const content = await limit(() => this.fetchFileContent(entry.path));
               results.push({ ...entry, content });
-            } catch (err: any) {
-              results.push({ ...entry, error: err.message });
+            } catch (err: unknown) {
+              results.push({ ...entry, error: getErrorMessage(err) });
             }
           })(),
         );
@@ -121,8 +160,8 @@ export class BitbucketClient {
               // This avoids deadlock where a limited parent waits for a limited child.
               const children = await this.getTree(entry.path, ignorePatterns);
               results.push({ ...entry, children });
-            } catch (err: any) {
-              results.push({ ...entry, error: err.message });
+            } catch (err: unknown) {
+              results.push({ ...entry, error: getErrorMessage(err) });
             }
           })(),
         );
@@ -144,22 +183,24 @@ export class BitbucketClient {
       .sort((a, b) => a.path.localeCompare(b.path));
 
     // Parallel fetch for files in current directory
-    const filePromises = filteredEntries
-      .filter((e) => e.type === "file")
-      .map((entry) => ({
-        entry,
-        promise: limit(() =>
-          this.fetchFileContent(entry.path).catch((e: any) => `Error: ${e.message}`),
-        ),
-      }));
+    const filePromiseMap = new Map(
+      filteredEntries
+        .filter((e) => e.type === "file")
+        .map((entry) => [
+          entry.path,
+          limit(() =>
+            this.fetchFileContent(entry.path).catch((e: unknown) => `Error: ${getErrorMessage(e)}`),
+          ),
+        ]),
+    );
 
     // Iterate over sorted entries
     for (const entry of filteredEntries) {
       if (entry.type === "file") {
         // Find the promise
-        const task = filePromises.find((t) => t.entry.path === entry.path);
+        const task = filePromiseMap.get(entry.path);
         if (task) {
-          const content = await task.promise;
+          const content = await task;
           yield `\n\nFile: ${entry.path}\n`;
           yield "================================================================\n";
           yield content;
